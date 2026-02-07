@@ -1,0 +1,9 @@
+spring:
+  application:
+    name: hadoop-copier
+
+hadoop:
+  conf-basedir: ${HADOOP_CONF_DIR:/etc/hadoop/conf}
+
+copy:
+  thread-pool-size: 10

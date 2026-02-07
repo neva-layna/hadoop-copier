@@ -1,0 +1,83 @@
+plugins {
+    id 'java'
+    id 'org.springframework.boot' version '3.5.9'
+    id 'io.spring.dependency-management' version '1.1.7'
+    id 'org.cyclonedx.bom' version '2.3.0'
+    id 'jacoco'
+}
+
+group = 'com.github.nlayna'
+version = '0.0.1'
+description = 'hadoop-copier'
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(17)
+    }
+}
+
+configurations {
+    compileOnly {
+        extendsFrom annotationProcessor
+    }
+}
+
+repositories {
+    mavenCentral()
+
+    project.properties.findAll { it.key.matches('nexus\\.repo\\.[^.]+\\.url') }.each { key, url ->
+        def repoName = (key =~ /nexus\.repo\.(.+)\.url/)[0][1]
+        def credPrefix = project.findProperty("nexus.repo.${repoName}.credentials") ?: 'NEXUS'
+        maven {
+            name = "nexus-${repoName}"
+            url = uri(url)
+            allowInsecureProtocol = url.startsWith('http://')
+            credentials {
+                username = System.getenv("${credPrefix}_USERNAME") ?: ''
+                password = System.getenv("${credPrefix}_PASSWORD") ?: ''
+            }
+        }
+    }
+}
+
+dependencies {
+    implementation 'org.springframework.boot:spring-boot-starter-web'
+    implementation 'org.springframework.boot:spring-boot-starter-actuator'
+    implementation 'com.alibaba.fastjson2:fastjson2:2.0.60'
+    implementation 'io.micrometer:micrometer-registry-prometheus'
+    implementation 'org.apache.hadoop:hadoop-client-api:3.3.6'
+    runtimeOnly 'org.apache.hadoop:hadoop-client-runtime:3.3.6'
+    compileOnly 'org.projectlombok:lombok'
+    annotationProcessor 'org.projectlombok:lombok'
+    testImplementation 'org.springframework.boot:spring-boot-starter-test'
+    testImplementation 'org.awaitility:awaitility:4.2.1'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+}
+
+tasks.named('test') {
+    useJUnitPlatform()
+    finalizedBy tasks.jacocoTestReport
+}
+
+jacocoTestReport {
+    dependsOn tasks.test
+    reports {
+        xml.required = true
+        html.required = true
+    }
+}
+
+jacocoTestCoverageVerification {
+    dependsOn tasks.jacocoTestReport
+    violationRules {
+        rule {
+            limit {
+                minimum = 0.50
+            }
+        }
+    }
+}
+
+tasks.named('check') {
+    dependsOn tasks.jacocoTestCoverageVerification
+}

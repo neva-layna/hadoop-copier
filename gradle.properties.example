@@ -1,0 +1,16 @@
+# Nexus repositories
+# Формат:
+#   nexus.repo.<имя>.url=<url>
+#   nexus.repo.<имя>.credentials=<ENV_PREFIX>   (по умолчанию NEXUS)
+#
+# Credentials берутся из env: <ENV_PREFIX>_USERNAME, <ENV_PREFIX>_PASSWORD
+#
+# Пример: два Nexus-сервера с разными credentials
+#
+# nexus.repo.releases.url=https://nexus.company.com/repository/maven-releases/
+# nexus.repo.snapshots.url=https://nexus.company.com/repository/maven-snapshots/
+#   -> используют NEXUS_USERNAME / NEXUS_PASSWORD (по умолчанию)
+#
+# nexus.repo.osc.url=https://osc-nexus.company.com/repository/maven-public/
+# nexus.repo.osc.credentials=OSC
+#   -> используют OSC_USERNAME / OSC_PASSWORD
