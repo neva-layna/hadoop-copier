@@ -1,24 +1,32 @@
 package com.github.nlayna.hadoopcopier.service;
 
+import com.github.nlayna.hadoopcopier.config.CopyProperties;
+import com.github.nlayna.hadoopcopier.model.CopyResult;
+import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.FileSystem;
-import org.apache.hadoop.fs.FileUtil;
 import org.apache.hadoop.fs.Path;
 import org.springframework.stereotype.Service;
 
-import java.io.File;
-import java.io.IOException;
+import java.io.*;
+import java.security.DigestInputStream;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Stack;
 
 @Slf4j
 @Service
+@RequiredArgsConstructor
 public class HdfsCopyService {
 
-    public long copyPath(FileSystem fs, String hdfsPath, String localPath) throws IOException {
+    private static final int BUFFER_SIZE = 64 * 1024;
+
+    private final CopyProperties copyProperties;
+
+    public CopyResult copyPath(FileSystem fs, String hdfsPath, String localPath, Integer bandwidthMbPerSec) throws IOException {
         Path sourcePath = new Path(hdfsPath);
 
         if (!fs.exists(sourcePath)) {
@@ -27,24 +35,25 @@ public class HdfsCopyService {
 
         FileStatus sourceStatus = fs.getFileStatus(sourcePath);
         if (sourceStatus.isDirectory()) {
-            return copyDirectory(fs, sourcePath, localPath);
+            return copyDirectory(fs, sourcePath, localPath, bandwidthMbPerSec);
         } else {
-            return copyFile(fs, sourcePath, localPath, sourceStatus.getLen());
+            return copyFile(fs, sourcePath, localPath, bandwidthMbPerSec);
         }
     }
 
-    private long copyFile(FileSystem fs, Path sourcePath, String localPath, long fileSize) throws IOException {
-        log.info("Copying file {} -> {} (size: {} bytes)", sourcePath, localPath, fileSize);
+    private CopyResult copyFile(FileSystem fs, Path sourcePath, String localPath, Integer bandwidthMbPerSec) throws IOException {
+        log.info("Copying file {} -> {}", sourcePath, localPath);
 
-        boolean success = FileUtil.copy(fs, sourcePath, new File(localPath), false, fs.getConf());
-        if (!success) {
-            throw new IOException("Failed to copy file: " + sourcePath);
+        File localFile = new File(localPath);
+        File parentDir = localFile.getParentFile();
+        if (parentDir != null && !parentDir.exists() && !parentDir.mkdirs()) {
+            throw new IOException("Failed to create parent directory: " + parentDir.getAbsolutePath());
         }
 
-        return fileSize;
+        return copyWithStreams(fs, sourcePath, localFile, bandwidthMbPerSec);
     }
 
-    private long copyDirectory(FileSystem fs, Path sourcePath, String localPath) throws IOException {
+    private CopyResult copyDirectory(FileSystem fs, Path sourcePath, String localPath, Integer bandwidthMbPerSec) throws IOException {
         log.info("Copying directory {} -> {}", sourcePath, localPath);
 
         File localDir = new File(localPath);
@@ -52,23 +61,10 @@ public class HdfsCopyService {
             throw new IOException("Failed to create local directory: " + localPath);
         }
 
-        Configuration conf = fs.getConf();
-        boolean copySuccess = false;
-        try {
-            copySuccess = FileUtil.copy(fs, sourcePath, localDir, false, conf);
-        } catch (IOException e) {
-            log.warn("FileUtil.copy failed for {}, falling back to manual copy: {}", sourcePath, e.getMessage());
-        }
-
-        if (!copySuccess) {
-            log.info("Using manual copy for directory: {}", sourcePath);
-            return manualCopyDirectory(fs, sourcePath, localDir, conf);
-        }
-
-        return calculateDirectorySize(fs, sourcePath);
+        return manualCopyDirectory(fs, sourcePath, localDir, bandwidthMbPerSec);
     }
 
-    private long manualCopyDirectory(FileSystem fs, Path sourcePath, File localDir, Configuration conf) throws IOException {
+    private CopyResult manualCopyDirectory(FileSystem fs, Path sourcePath, File localDir, Integer bandwidthMbPerSec) throws IOException {
         Stack<Path> dirsToProcess = new Stack<>();
         dirsToProcess.push(sourcePath);
 
@@ -76,6 +72,7 @@ public class HdfsCopyService {
         pathMap.put(sourcePath, localDir);
 
         long totalBytes = 0;
+        boolean allVerified = true;
         int filesCopied = 0;
         int dirsCopied = 0;
 
@@ -96,11 +93,11 @@ public class HdfsCopyService {
                     dirsToProcess.push(itemPath);
                     pathMap.put(itemPath, localItem);
                 } else {
-                    boolean success = FileUtil.copy(fs, itemPath, localItem, false, conf);
-                    if (!success) {
-                        fs.copyToLocalFile(false, itemPath, new Path(localItem.getAbsolutePath()), true);
+                    CopyResult fileResult = copyWithStreams(fs, itemPath, localItem, bandwidthMbPerSec);
+                    totalBytes += fileResult.bytesCopied();
+                    if (!fileResult.checksumVerified()) {
+                        allVerified = false;
                     }
-                    totalBytes += item.getLen();
                     filesCopied++;
                     log.debug("Copied file: {} ({} bytes)", itemPath.getName(), item.getLen());
                 }
@@ -108,19 +105,80 @@ public class HdfsCopyService {
         }
 
         log.info("Manual copy completed: {} files, {} directories", filesCopied, dirsCopied);
-        return totalBytes;
+        return new CopyResult(totalBytes, allVerified && filesCopied > 0);
     }
 
-    private long calculateDirectorySize(FileSystem fs, Path path) throws IOException {
-        long size = 0;
-        FileStatus[] statuses = fs.listStatus(path);
-        for (FileStatus status : statuses) {
-            if (status.isDirectory()) {
-                size += calculateDirectorySize(fs, status.getPath());
-            } else {
-                size += status.getLen();
+    private CopyResult copyWithStreams(FileSystem fs, Path sourcePath, File localFile, Integer bandwidthMbPerSec) throws IOException {
+        boolean checksumEnabled = copyProperties.isChecksumEnabled();
+        long totalBytes = 0;
+
+        MessageDigest sourceDigest = null;
+        if (checksumEnabled) {
+            try {
+                sourceDigest = MessageDigest.getInstance("MD5");
+            } catch (NoSuchAlgorithmException e) {
+                throw new IOException("MD5 algorithm not available", e);
             }
         }
-        return size;
+
+        try (InputStream rawIn = fs.open(sourcePath);
+             InputStream throttledIn = wrapWithThrottle(rawIn, bandwidthMbPerSec);
+             InputStream in = checksumEnabled ? new DigestInputStream(throttledIn, sourceDigest) : throttledIn;
+             OutputStream out = new FileOutputStream(localFile)) {
+
+            byte[] buffer = new byte[BUFFER_SIZE];
+            int bytesRead;
+            while ((bytesRead = in.read(buffer)) != -1) {
+                out.write(buffer, 0, bytesRead);
+                totalBytes += bytesRead;
+            }
+        }
+
+        if (checksumEnabled) {
+            byte[] sourceHash = sourceDigest.digest();
+            byte[] localHash = computeLocalFileMd5(localFile);
+
+            if (!MessageDigest.isEqual(sourceHash, localHash)) {
+                throw new IOException("Checksum mismatch for " + localFile.getAbsolutePath()
+                        + ": source=" + bytesToHex(sourceHash)
+                        + ", local=" + bytesToHex(localHash));
+            }
+            log.debug("Checksum verified for {}: {}", localFile.getName(), bytesToHex(sourceHash));
+            return new CopyResult(totalBytes, true);
+        }
+
+        return new CopyResult(totalBytes, false);
+    }
+
+    byte[] computeLocalFileMd5(File file) throws IOException {
+        try {
+            MessageDigest md = MessageDigest.getInstance("MD5");
+            try (InputStream fis = new FileInputStream(file)) {
+                byte[] buffer = new byte[BUFFER_SIZE];
+                int bytesRead;
+                while ((bytesRead = fis.read(buffer)) != -1) {
+                    md.update(buffer, 0, bytesRead);
+                }
+            }
+            return md.digest();
+        } catch (NoSuchAlgorithmException e) {
+            throw new IOException("MD5 algorithm not available", e);
+        }
+    }
+
+    private String bytesToHex(byte[] bytes) {
+        StringBuilder sb = new StringBuilder(bytes.length * 2);
+        for (byte b : bytes) {
+            sb.append(String.format("%02x", b));
+        }
+        return sb.toString();
+    }
+
+    private InputStream wrapWithThrottle(InputStream in, Integer bandwidthMbPerSec) {
+        if (bandwidthMbPerSec == null) {
+            return in;
+        }
+        long maxBytesPerSecond = (long) bandwidthMbPerSec * 1024 * 1024;
+        return new ThrottledInputStream(in, maxBytesPerSecond);
     }
 }

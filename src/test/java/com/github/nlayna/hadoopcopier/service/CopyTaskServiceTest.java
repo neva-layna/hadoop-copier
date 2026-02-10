@@ -1,6 +1,7 @@
 package com.github.nlayna.hadoopcopier.service;
 
 import com.github.nlayna.hadoopcopier.model.*;
+import com.github.nlayna.hadoopcopier.model.CopyResult;
 import org.apache.hadoop.fs.FileSystem;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -16,8 +17,7 @@ import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
-import static org.mockito.ArgumentMatchers.anyString;
-import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.*;
 
 @ExtendWith(MockitoExtension.class)
@@ -64,8 +64,8 @@ class CopyTaskServiceTest {
     @Test
     void submitTask_successfulCopy_setsCompletedStatus() throws Exception {
         when(fileSystemFactory.createFileSystem("ns1")).thenReturn(fileSystem);
-        when(hdfsCopyService.copyPath(eq(fileSystem), eq("/data/result1"), eq("/tmp/res1")))
-                .thenReturn(1024L);
+        when(hdfsCopyService.copyPath(eq(fileSystem), eq("/data/result1"), eq("/tmp/res1"), isNull()))
+                .thenReturn(new CopyResult(1024L, true));
 
         CopyRequest request = new CopyRequest();
         request.setNamespace("ns1");
@@ -81,6 +81,7 @@ class CopyTaskServiceTest {
             assertThat(task.getStatus()).isEqualTo(CopyTaskStatus.COMPLETED);
             assertThat(task.getCompletedAt()).isNotNull();
             assertThat(task.getItems().get(0).getBytesCopied()).isEqualTo(1024L);
+            assertThat(task.getItems().get(0).isChecksumVerified()).isTrue();
             assertThat(task.getItems().get(0).getStatus()).isEqualTo(CopyItemStatus.COMPLETED);
         });
     }
@@ -88,7 +89,7 @@ class CopyTaskServiceTest {
     @Test
     void submitTask_failedCopy_setsFailedStatus() throws Exception {
         when(fileSystemFactory.createFileSystem("ns1")).thenReturn(fileSystem);
-        when(hdfsCopyService.copyPath(eq(fileSystem), anyString(), anyString()))
+        when(hdfsCopyService.copyPath(eq(fileSystem), anyString(), anyString(), isNull()))
                 .thenThrow(new IOException("HDFS unavailable"));
 
         CopyRequest request = new CopyRequest();
@@ -111,9 +112,9 @@ class CopyTaskServiceTest {
     @Test
     void submitTask_partialFailure_setsPartiallyFailedStatus() throws Exception {
         when(fileSystemFactory.createFileSystem("ns1")).thenReturn(fileSystem);
-        when(hdfsCopyService.copyPath(eq(fileSystem), eq("/data/result1"), eq("/tmp/res1")))
-                .thenReturn(1024L);
-        when(hdfsCopyService.copyPath(eq(fileSystem), eq("/data/result2"), eq("/tmp/res2")))
+        when(hdfsCopyService.copyPath(eq(fileSystem), eq("/data/result1"), eq("/tmp/res1"), isNull()))
+                .thenReturn(new CopyResult(1024L, true));
+        when(hdfsCopyService.copyPath(eq(fileSystem), eq("/data/result2"), eq("/tmp/res2"), isNull()))
                 .thenThrow(new IOException("File not found"));
 
         CopyRequest request = new CopyRequest();
@@ -140,10 +141,10 @@ class CopyTaskServiceTest {
     @Test
     void submitTask_multipleItems_executesInParallel() throws Exception {
         when(fileSystemFactory.createFileSystem("ns1")).thenReturn(fileSystem);
-        when(hdfsCopyService.copyPath(eq(fileSystem), anyString(), anyString()))
+        when(hdfsCopyService.copyPath(eq(fileSystem), anyString(), anyString(), isNull()))
                 .thenAnswer(invocation -> {
                     Thread.sleep(100);
-                    return 512L;
+                    return new CopyResult(512L, true);
                 });
 
         CopyRequest request = new CopyRequest();
@@ -189,5 +190,30 @@ class CopyTaskServiceTest {
 
         CopyTask task = copyTaskService.getTask(requestId).orElseThrow();
         assertThat(task.getStatus()).isIn(CopyTaskStatus.IN_PROGRESS, CopyTaskStatus.COMPLETED, CopyTaskStatus.FAILED);
+    }
+
+    @Test
+    void submitTask_withBandwidth_passesBandwidthToCopyService() throws Exception {
+        when(fileSystemFactory.createFileSystem("ns1")).thenReturn(fileSystem);
+        when(hdfsCopyService.copyPath(eq(fileSystem), eq("/data/result1"), eq("/tmp/res1"), eq(10)))
+                .thenReturn(new CopyResult(2048L, true));
+
+        CopyRequest request = new CopyRequest();
+        request.setNamespace("ns1");
+        request.setBandwidth(10);
+        CopyItem item = new CopyItem();
+        item.setHdfsPath("/data/result1");
+        item.setLocalPath("/tmp/res1");
+        request.setItems(List.of(item));
+
+        String requestId = copyTaskService.submitTask(request);
+
+        await().atMost(5, TimeUnit.SECONDS).untilAsserted(() -> {
+            CopyTask task = copyTaskService.getTask(requestId).orElseThrow();
+            assertThat(task.getStatus()).isEqualTo(CopyTaskStatus.COMPLETED);
+            assertThat(task.getBandwidth()).isEqualTo(10);
+        });
+
+        verify(hdfsCopyService).copyPath(eq(fileSystem), eq("/data/result1"), eq("/tmp/res1"), eq(10));
     }
 }

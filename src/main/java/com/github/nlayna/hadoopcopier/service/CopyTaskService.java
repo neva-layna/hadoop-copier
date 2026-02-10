@@ -39,7 +39,7 @@ public class CopyTaskService {
                 .map(item -> new CopyItemTask(item.getHdfsPath(), item.getLocalPath()))
                 .toList();
 
-        CopyTask task = new CopyTask(requestId, request.getNamespace(), itemTasks);
+        CopyTask task = new CopyTask(requestId, request.getNamespace(), request.getBandwidth(), itemTasks);
         tasks.put(requestId, task);
 
         log.info("Task {} submitted: namespace={}, items={}", requestId, request.getNamespace(), itemTasks.size());
@@ -59,7 +59,7 @@ public class CopyTaskService {
         for (CopyItemTask itemTask : task.getItems()) {
             copyExecutor.execute(() -> {
                 try {
-                    executeItemCopy(task.getNamespace(), itemTask);
+                    executeItemCopy(task.getNamespace(), task.getBandwidth(), itemTask);
                 } finally {
                     latch.countDown();
                 }
@@ -79,22 +79,23 @@ public class CopyTaskService {
         });
     }
 
-    private void executeItemCopy(String namespace, CopyItemTask itemTask) {
+    private void executeItemCopy(String namespace, Integer bandwidthMbPerSec, CopyItemTask itemTask) {
         itemTask.setStatus(CopyItemStatus.IN_PROGRESS);
         log.info("Copying: {} -> {}", itemTask.getHdfsPath(), itemTask.getLocalPath());
 
         long startTime = System.currentTimeMillis();
         try (FileSystem fs = fileSystemFactory.createFileSystem(namespace)) {
-            long bytesCopied = hdfsCopyService.copyPath(fs, itemTask.getHdfsPath(), itemTask.getLocalPath());
+            CopyResult result = hdfsCopyService.copyPath(fs, itemTask.getHdfsPath(), itemTask.getLocalPath(), bandwidthMbPerSec);
             long duration = System.currentTimeMillis() - startTime;
 
-            itemTask.setBytesCopied(bytesCopied);
+            itemTask.setBytesCopied(result.bytesCopied());
+            itemTask.setChecksumVerified(result.checksumVerified());
             itemTask.setDurationMs(duration);
             itemTask.setStatus(CopyItemStatus.COMPLETED);
 
             log.info("Completed: {} -> {} ({} bytes in {}ms, speed: {})",
                     itemTask.getHdfsPath(), itemTask.getLocalPath(),
-                    bytesCopied, duration, itemTask.getSpeed());
+                    result.bytesCopied(), duration, itemTask.getSpeed());
         } catch (Exception e) {
             long duration = System.currentTimeMillis() - startTime;
             itemTask.setDurationMs(duration);

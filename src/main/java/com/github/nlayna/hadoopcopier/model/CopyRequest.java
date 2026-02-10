@@ -8,4 +8,5 @@ import java.util.List;
 public class CopyRequest {
     private String namespace;
     private List<CopyItem> items;
+    private Integer bandwidth;
 }

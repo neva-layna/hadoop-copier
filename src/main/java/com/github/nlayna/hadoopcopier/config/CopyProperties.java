@@ -9,4 +9,5 @@ import org.springframework.stereotype.Component;
 @ConfigurationProperties(prefix = "copy")
 public class CopyProperties {
     private int threadPoolSize = 10;
+    private boolean checksumEnabled = true;
 }

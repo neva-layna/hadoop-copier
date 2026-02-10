@@ -10,6 +10,7 @@ public class CopyItemTask {
     private volatile long bytesCopied;
     private volatile long durationMs;
     private volatile String errorMessage;
+    private volatile boolean checksumVerified;
 
     public CopyItemTask(String hdfsPath, String localPath) {
         this.hdfsPath = hdfsPath;

@@ -27,6 +27,10 @@ public class CopyController {
             return ResponseEntity.badRequest()
                     .body(Map.of("error", "items must not be empty"));
         }
+        if (request.getBandwidth() != null && request.getBandwidth() <= 0) {
+            return ResponseEntity.badRequest()
+                    .body(Map.of("error", "bandwidth must be positive"));
+        }
 
         String requestId = copyTaskService.submitTask(request);
         return ResponseEntity.status(HttpStatus.ACCEPTED)

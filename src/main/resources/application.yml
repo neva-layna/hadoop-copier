@@ -7,3 +7,4 @@ hadoop:
 
 copy:
   thread-pool-size: 10
+  checksum-enabled: true

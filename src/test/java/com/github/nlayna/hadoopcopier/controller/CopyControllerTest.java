@@ -114,7 +114,7 @@ class CopyControllerTest {
 
     @Test
     void getTaskStatus_existingTask_returns200() throws Exception {
-        CopyTask task = new CopyTask("req-123", "ns1",
+        CopyTask task = new CopyTask("req-123", "ns1", null,
                 List.of(new CopyItemTask("/data/res1", "/tmp/res1")));
         task.setStatus(CopyTaskStatus.IN_PROGRESS);
 
@@ -124,7 +124,26 @@ class CopyControllerTest {
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.requestId").value("req-123"))
                 .andExpect(jsonPath("$.status").value("IN_PROGRESS"))
-                .andExpect(jsonPath("$.items[0].hdfsPath").value("/data/res1"));
+                .andExpect(jsonPath("$.items[0].hdfsPath").value("/data/res1"))
+                .andExpect(jsonPath("$.items[0].checksumVerified").value(false));
+    }
+
+    @Test
+    void getTaskStatus_completedWithChecksum_returnsChecksumVerified() throws Exception {
+        CopyItemTask itemTask = new CopyItemTask("/data/res1", "/tmp/res1");
+        itemTask.setStatus(CopyItemStatus.COMPLETED);
+        itemTask.setBytesCopied(1024L);
+        itemTask.setChecksumVerified(true);
+
+        CopyTask task = new CopyTask("req-456", "ns1", null, List.of(itemTask));
+        task.setStatus(CopyTaskStatus.COMPLETED);
+
+        when(copyTaskService.getTask("req-456")).thenReturn(Optional.of(task));
+
+        mockMvc.perform(get("/api/v1/copy/req-456"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.items[0].checksumVerified").value(true))
+                .andExpect(jsonPath("$.items[0].bytesCopied").value(1024));
     }
 
     @Test
@@ -152,5 +171,58 @@ class CopyControllerTest {
                                 """))
                 .andExpect(status().isAccepted())
                 .andExpect(jsonPath("$.requestId").value("multi-id"));
+    }
+
+    @Test
+    void submitCopyRequest_zeroBandwidth_returns400() throws Exception {
+        mockMvc.perform(post("/api/v1/copy")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {
+                                    "namespace": "nameservice1",
+                                    "bandwidth": 0,
+                                    "items": [
+                                        {"hdfsPath": "/data/result1", "localPath": "/tmp/res1"}
+                                    ]
+                                }
+                                """))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.error").value("bandwidth must be positive"));
+    }
+
+    @Test
+    void submitCopyRequest_negativeBandwidth_returns400() throws Exception {
+        mockMvc.perform(post("/api/v1/copy")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {
+                                    "namespace": "nameservice1",
+                                    "bandwidth": -5,
+                                    "items": [
+                                        {"hdfsPath": "/data/result1", "localPath": "/tmp/res1"}
+                                    ]
+                                }
+                                """))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.error").value("bandwidth must be positive"));
+    }
+
+    @Test
+    void submitCopyRequest_validBandwidth_returns202() throws Exception {
+        when(copyTaskService.submitTask(any())).thenReturn("bw-request-id");
+
+        mockMvc.perform(post("/api/v1/copy")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {
+                                    "namespace": "nameservice1",
+                                    "bandwidth": 10,
+                                    "items": [
+                                        {"hdfsPath": "/data/result1", "localPath": "/tmp/res1"}
+                                    ]
+                                }
+                                """))
+                .andExpect(status().isAccepted())
+                .andExpect(jsonPath("$.requestId").value("bw-request-id"));
     }
 }
